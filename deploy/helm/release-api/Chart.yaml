@@ -1,0 +1,7 @@
+apiVersion: v2
+name: release-api
+description: Helm chart for the release-api portfolio service
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+

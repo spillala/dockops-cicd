@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "release-api.fullname" . }}
+  labels:
+    {{- include "release-api.labels" . | nindent 4 }}
+data:
+  APP_ENV: {{ .Values.env.APP_ENV | quote }}
+  APP_PORT: {{ .Values.env.APP_PORT | quote }}
+  LOG_LEVEL: {{ .Values.env.LOG_LEVEL | quote }}
+  FEATURE_CACHE_WARM: {{ .Values.env.FEATURE_CACHE_WARM | quote }}
+

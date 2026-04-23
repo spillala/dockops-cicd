@@ -1,0 +1,69 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "release-api.fullname" . }}
+  labels:
+    {{- include "release-api.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "release-api.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "release-api.name" . }}
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      containers:
+        - name: release-api
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - containerPort: {{ .Values.service.targetPort }}
+              name: http
+          env:
+            - name: APP_NAME
+              value: release-api
+            - name: APP_ENV
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "release-api.fullname" . }}
+                  key: APP_ENV
+            - name: APP_PORT
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "release-api.fullname" . }}
+                  key: APP_PORT
+            - name: LOG_LEVEL
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "release-api.fullname" . }}
+                  key: LOG_LEVEL
+            - name: FEATURE_CACHE_WARM
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "release-api.fullname" . }}
+                  key: FEATURE_CACHE_WARM
+            - name: SAMPLE_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "release-api.fullname" . }}
+                  key: SAMPLE_API_TOKEN
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            failureThreshold: 10
+            periodSeconds: 3
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}

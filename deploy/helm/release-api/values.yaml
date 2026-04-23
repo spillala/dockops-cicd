@@ -1,0 +1,35 @@
+replicaCount: 1
+
+image:
+  repository: ghcr.io/spillalamarri/release-api
+  tag: dev
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 8080
+
+ingress:
+  enabled: true
+  className: public
+  host: release-api.local
+  path: /
+
+env:
+  APP_ENV: dev
+  APP_PORT: "8080"
+  LOG_LEVEL: info
+  FEATURE_CACHE_WARM: "true"
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 250m
+    memory: 256Mi
+
+secretEnv:
+  SAMPLE_API_TOKEN: change-me
+

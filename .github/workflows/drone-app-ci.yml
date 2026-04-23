@@ -1,0 +1,29 @@
+name: Drone App CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker build -t dronefleet-app:${{ github.sha }} .
+
+      - name: Run health check test
+        run: |
+          docker run -d --name test-app -p 8080:8080 dronefleet-app:${{ github.sha }}
+          sleep 5
+          curl --fail http://localhost:8080/health || exit 1
+          docker stop test-app
+
+      - name: Push to registry
+        if: github.ref == 'refs/heads/main'
+        run: |
+          echo "Push to GHCR goes here"

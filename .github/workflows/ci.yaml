@@ -1,0 +1,37 @@
+name: ci
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+jobs:
+  test-and-build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - name: Run tests
+        run: go test ./...
+
+      - name: Build binary
+        run: go build ./cmd/release-api
+
+      - name: Build container
+        run: |
+          docker build \
+            --build-arg APP_VERSION=${GITHUB_SHA::7} \
+            --build-arg GIT_SHA=${GITHUB_SHA::7} \
+            --build-arg BUILD_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ") \
+            -t release-api:${GITHUB_SHA::7} .
+
+      - name: Publish design note
+        run: |
+          echo "CI is passing. Next step is enabling registry push and GitOps tag updates." >> "$GITHUB_STEP_SUMMARY"
