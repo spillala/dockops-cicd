@@ -1,8 +1,0 @@
-image:
-  repository: docker.io/library/release-api
-  tag: dev
-  pullPolicy: Never
-
-env:
-  APP_ENV: dev
-  LOG_LEVEL: debug

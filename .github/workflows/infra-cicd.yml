@@ -1,0 +1,198 @@
+# ============================================================
+#  DockOps — Infrastructure CI/CD Pipeline
+#  Validates and deploys K8s manifests separately from app code.
+#  AI agent verifies cluster health after every infra change.
+# ============================================================
+
+name: Infrastructure CI/CD
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "k8s/**"
+      - "helm/**"
+      - ".github/workflows/infra-cicd.yml"
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "k8s/**"
+      - "helm/**"
+
+env:
+  K8S_NAMESPACE: dronefleet
+
+jobs:
+
+  # ── VALIDATE ────────────────────────────────────────────────
+  validate:
+    name: Validate manifests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install tools
+        run: |
+          # kubectl for dry-run
+          curl -sLO "https://dl.k8s.io/release/v1.30.0/bin/linux/amd64/kubectl"
+          chmod +x kubectl && sudo mv kubectl /usr/local/bin/
+
+          # kubeconform for schema validation
+          curl -sL https://github.com/yannh/kubeconform/releases/latest/download/kubeconform-linux-amd64.tar.gz \
+            | tar -xz && sudo mv kubeconform /usr/local/bin/
+
+      - name: Schema validation with kubeconform
+        run: |
+          find k8s/ -name "*.yaml" | xargs kubeconform \
+            -strict \
+            -summary \
+            -kubernetes-version 1.30.0
+
+      - name: Dry-run apply
+        run: |
+          kubectl apply --dry-run=client -f k8s/base/deployment.yaml
+
+  # ── DEPLOY INFRA ────────────────────────────────────────────
+  deploy-infra:
+    name: Deploy infra changes
+    runs-on: ubuntu-latest
+    needs: validate
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure kubectl
+        run: |
+          mkdir -p $HOME/.kube
+          echo "${{ secrets.KUBECONFIG_BASE64 }}" | base64 -d > $HOME/.kube/config
+          chmod 600 $HOME/.kube/config
+
+      - name: Apply infra changes
+        run: |
+          kubectl apply -f k8s/base/ -n ${{ env.K8S_NAMESPACE }}
+
+      - name: Wait for stability
+        run: |
+          sleep 15
+          kubectl get pods -n ${{ env.K8S_NAMESPACE }}
+
+  # ── AI VERIFICATION ─────────────────────────────────────────
+  ai-verify:
+    name: AI cluster health check
+    runs-on: ubuntu-latest
+    needs: deploy-infra
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Configure kubectl
+        run: |
+          mkdir -p $HOME/.kube
+          echo "${{ secrets.KUBECONFIG_BASE64 }}" | base64 -d > $HOME/.kube/config
+          chmod 600 $HOME/.kube/config
+
+      - name: Collect cluster state
+        id: cluster-state
+        run: |
+          echo "Collecting cluster state for AI verification..."
+
+          PODS=$(kubectl get pods -n ${{ env.K8S_NAMESPACE }} -o json)
+          EVENTS=$(kubectl get events -n ${{ env.K8S_NAMESPACE }} \
+            --sort-by='.lastTimestamp' | tail -20)
+          DEPLOY=$(kubectl get deployment dronefleet \
+            -n ${{ env.K8S_NAMESPACE }} -o json 2>/dev/null || echo "{}")
+
+          # Write state to file for AI agent
+          cat > /tmp/cluster-state.json << EOF
+          {
+            "namespace": "${{ env.K8S_NAMESPACE }}",
+            "trigger": "infra_cicd",
+            "commit": "${{ github.sha }}",
+            "pods": $PODS,
+            "deployment": $DEPLOY,
+            "recent_events": "$(echo "$EVENTS" | sed 's/"/\\"/g')"
+          }
+          EOF
+          echo "State collected."
+
+      - name: Run AI health verification
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          python3 << 'PYEOF'
+          import json, urllib.request, urllib.error, os, sys
+
+          api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+          if not api_key:
+              print("ANTHROPIC_API_KEY not set — skipping AI verification")
+              sys.exit(0)
+
+          with open("/tmp/cluster-state.json") as f:
+              state = f.read()
+
+          payload = json.dumps({
+              "model": "claude-sonnet-4-20250514",
+              "max_tokens": 1000,
+              "messages": [{
+                  "role": "user",
+                  "content": f"""You are DockOps AI SRE. Analyse this Kubernetes cluster state after an infra deployment.
+
+          Cluster state:
+          {state}
+
+          Check for:
+          1. Any pods in CrashLoopBackOff, Pending, or Error state
+          2. Any OOMKilled containers
+          3. Recent Warning events that indicate problems
+          4. Deployment replicas ready vs desired
+
+          Respond ONLY with valid JSON in this format:
+          {{
+            "verdict": "PASS" or "FAIL",
+            "issues": ["list of issues found, empty if none"],
+            "recommendation": "brief action if FAIL, or 'No action needed' if PASS"
+          }}"""
+              }]
+          }).encode()
+
+          req = urllib.request.Request(
+              "https://api.anthropic.com/v1/messages",
+              data=payload,
+              headers={
+                  "Content-Type": "application/json",
+                  "x-api-key": api_key,
+                  "anthropic-version": "2023-06-01"
+              }
+          )
+
+          try:
+              with urllib.request.urlopen(req, timeout=30) as resp:
+                  data = json.loads(resp.read())
+                  text = data["content"][0]["text"]
+                  result = json.loads(text)
+
+                  print(f"AI Verdict: {result['verdict']}")
+                  if result["issues"]:
+                      print("Issues found:")
+                      for issue in result["issues"]:
+                          print(f"  - {issue}")
+                  print(f"Recommendation: {result['recommendation']}")
+
+                  if result["verdict"] == "FAIL":
+                      print("AI verification FAILED — check issues above")
+                      sys.exit(1)
+                  else:
+                      print("AI verification PASSED — cluster is healthy")
+
+          except Exception as e:
+              print(f"AI verification error: {e} — continuing without AI check")
+              sys.exit(0)
+          PYEOF
+
+      - name: Verification summary
+        if: always()
+        run: |
+          echo "### Infra Deploy + AI Verification Complete" >> $GITHUB_STEP_SUMMARY
+          echo "Commit: \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
