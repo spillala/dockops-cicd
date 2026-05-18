@@ -1,0 +1,79 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dronefleet
+  namespace: dronefleet
+  labels:
+    app: dronefleet
+    part-of: dockops
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: dronefleet
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: dronefleet
+    spec:
+      # Non-root for security — matches distroless nonroot user in Dockerfile
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        fsGroup: 65532
+      containers:
+        - name: dronefleet
+          image: ghcr.io/spillala/dronefleet:latest
+          ports:
+            - containerPort: 8080
+              name: http
+          env:
+            - name: APP_ENV
+              value: production
+            - name: APP_PORT
+              value: "8080"
+            - name: LOG_LEVEL
+              value: info
+            - name: MAX_FLEET_SIZE
+              value: "50"
+            - name: TELEMETRY_BUFFER
+              value: "100"
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: dronefleet-secrets
+                  key: database-url
+                  optional: true        # falls back to in-memory store if not set
+          # dronefleet exposes /healthz and /readyz (note the z suffix)
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+      restartPolicy: Always

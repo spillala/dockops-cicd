@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: dronefleet-svc
+  namespace: dronefleet
+  labels:
+    app: dronefleet
+    part-of: dockops
+spec:
+  selector:
+    app: dronefleet
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+      protocol: TCP
+  type: ClusterIP

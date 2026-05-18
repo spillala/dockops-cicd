@@ -1,0 +1,13 @@
+apiVersion: v2
+name: dronefleet
+description: DroneFleet API — DockOps reference application
+type: application
+version: 0.1.0
+appVersion: "latest"
+keywords:
+  - dronefleet
+  - dockops
+  - drone
+home: https://github.com/spillala/dronefleet
+sources:
+  - https://github.com/spillala/dronefleet
