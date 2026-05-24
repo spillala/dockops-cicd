@@ -1,377 +1,147 @@
-# ============================================================
-#  DockOps — DroneFleet App CI/CD Pipeline
-#  Part of: github.com/spillala/dockops-cicd
-#
-#  Pipeline stages:
-#   1. lint        — code quality checks
-#   2. test        — unit + integration tests
-#   3. build       — Docker multi-stage build (tests run inside)
-#   4. push        — push image to GitHub Container Registry
-#   5. deploy      — rolling update to K8s cluster
-#   6. smoke-test  — post-deploy health verification
-#   7. rollback    — automatic rollback if smoke test fails
-#   8. notify      — Slack notification with result
-# ============================================================
-
 name: DroneFleet App CI/CD
 
 on:
-  push:
-    branches:
-      - main
-      - "release/**"
-    paths:
-      - "app/dronefleet/**"
-      - "k8s/**"
-      - "Dockerfile"
-      - ".github/workflows/drone-app-cicd.yml"
-  pull_request:
-    branches:
-      - main
-    paths:
-      - "app/dronefleet/**"
-      - "Dockerfile"
+  repository_dispatch:
+    types:
+      - dronefleet-app-updated
+
+permissions:
+  contents: write
+  packages: write
 
 env:
-  REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository_owner }}/dronefleet
-  K8S_NAMESPACE: dronefleet
-  DEPLOYMENT_NAME: dronefleet
+  APP_REPOSITORY: spillala/dronefleet
+  DEPLOY_BRANCH: main
+  IMAGE_REPOSITORY: ghcr.io/spillala/dronefleet
+  VALUES_FILE: helm/dronefleet/values.yaml
 
 jobs:
-
-  # ── 1. LINT ─────────────────────────────────────────────────
-  lint:
-    name: Lint
+  build-push-and-update-values:
+    name: Build Image and Update Helm Values
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-          cache: "pip"
-          cache-dependency-path: app/dronefleet/src/requirements.txt
-
-      - name: Install linting tools
-        run: pip install ruff
-
-      - name: Lint with ruff
-        run: ruff check app/dronefleet/src/ --output-format=github
-
-      - name: Validate K8s manifests with kubectl
+      - name: Validate dispatch payload
+        id: payload
+        env:
+          PAYLOAD_REPOSITORY: ${{ github.event.client_payload.repository }}
+          PAYLOAD_COMMIT_SHA: ${{ github.event.client_payload.commit_sha }}
+          PAYLOAD_BRANCH: ${{ github.event.client_payload.branch }}
         run: |
-          curl -sLO "https://dl.k8s.io/release/v1.30.0/bin/linux/amd64/kubectl"
-          chmod +x kubectl && sudo mv kubectl /usr/local/bin/
-          kubectl apply --dry-run=client -f k8s/base/deployment.yaml
+          APP_REPOSITORY="${PAYLOAD_REPOSITORY:-${APP_REPOSITORY}}"
+          COMMIT_SHA="${PAYLOAD_COMMIT_SHA}"
+          SOURCE_BRANCH="${PAYLOAD_BRANCH:-unknown}"
 
-  # ── 2. TEST ─────────────────────────────────────────────────
-  test:
-    name: Test
-    runs-on: ubuntu-latest
-    needs: lint
-    steps:
-      - name: Checkout
+          if [ -z "$COMMIT_SHA" ]; then
+            echo "repository_dispatch payload is missing client_payload.commit_sha."
+            exit 1
+          fi
+
+          SHORT_SHA="$(printf '%s' "$COMMIT_SHA" | cut -c1-7)"
+          BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+          echo "app-repository=${APP_REPOSITORY}" >> "$GITHUB_OUTPUT"
+          echo "commit-sha=${COMMIT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "short-sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "source-branch=${SOURCE_BRANCH}" >> "$GITHUB_OUTPUT"
+          echo "build-time=${BUILD_TIME}" >> "$GITHUB_OUTPUT"
+          echo "image=${IMAGE_REPOSITORY}:${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout DroneFleet app
         uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
-          cache: "pip"
-          cache-dependency-path: app/dronefleet/src/requirements.txt
+          repository: ${{ steps.payload.outputs.app-repository }}
+          ref: ${{ steps.payload.outputs.commit-sha }}
+          path: app
 
-      - name: Install dependencies
-        run: |
-          pip install -r app/dronefleet/src/requirements.txt
-          pip install pytest pytest-cov httpx
-
-      - name: Run tests with coverage
-        run: |
-          pytest app/dronefleet/tests/ \
-            -v \
-            --tb=short \
-            --cov=app/dronefleet/src \
-            --cov-report=term-missing \
-            --cov-report=xml \
-            --cov-fail-under=80
-
-      - name: Upload coverage report
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: coverage-report
-          path: coverage.xml
-          retention-days: 7
-
-  # ── 3 & 4. BUILD + PUSH ─────────────────────────────────────
-  build-and-push:
-    name: Build & Push
-    runs-on: ubuntu-latest
-    needs: test
-    # Only push on main branch — PRs only build to verify
-    outputs:
-      image-tag: ${{ steps.meta.outputs.version }}
-      image-digest: ${{ steps.build.outputs.digest }}
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      - name: Checkout
+      - name: Checkout DockOps GitOps repo
         uses: actions/checkout@v4
+        with:
+          ref: ${{ env.DEPLOY_BRANCH }}
+          path: deploy
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: app/go.mod
+          cache: true
+          cache-dependency-path: app/go.sum
+
+      - name: Lint
+        working-directory: app
+        run: |
+          UNFORMATTED="$(gofmt -l .)"
+          if [ -n "$UNFORMATTED" ]; then
+            echo "Go files need formatting:"
+            echo "$UNFORMATTED"
+            exit 1
+          fi
+
+          go vet ./...
+
+      - name: Test
+        working-directory: app
+        run: go test ./...
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
       - name: Log in to GitHub Container Registry
-        if: github.ref == 'refs/heads/main'
         uses: docker/login-action@v3
         with:
-          registry: ${{ env.REGISTRY }}
+          registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract metadata (tags, labels)
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          tags: |
-            type=sha,prefix=,suffix=,format=short
-            type=ref,event=branch
-            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
-
-      - name: Build (and push on main)
+      - name: Build and push DroneFleet image
         id: build
         uses: docker/build-push-action@v6
         with:
-          context: .
-          file: ./Dockerfile
-          push: ${{ github.ref == 'refs/heads/main' }}
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          context: app
+          file: app/Dockerfile
+          push: true
+          tags: |
+            ${{ steps.payload.outputs.image }}
+            ${{ env.IMAGE_REPOSITORY }}:latest
+          build-args: |
+            APP_VERSION=${{ steps.payload.outputs.short-sha }}
+            GIT_SHA=${{ steps.payload.outputs.commit-sha }}
+            BUILD_TIME=${{ steps.payload.outputs.build-time }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           provenance: true
-          sbom: true              # Software Bill of Materials — good practice
+          sbom: true
 
-      - name: Output image summary
-        run: |
-          echo "### Docker Image Built" >> $GITHUB_STEP_SUMMARY
-          echo "| Tag | Value |" >> $GITHUB_STEP_SUMMARY
-          echo "|-----|-------|" >> $GITHUB_STEP_SUMMARY
-          echo "| Image | \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| SHA tag | \`${{ steps.meta.outputs.version }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| Digest | \`${{ steps.build.outputs.digest }}\` |" >> $GITHUB_STEP_SUMMARY
-
-  # ── 5. DEPLOY ───────────────────────────────────────────────
-  deploy:
-    name: Deploy to K8s
-    runs-on: ubuntu-latest
-    needs: build-and-push
-    if: github.ref == 'refs/heads/main'
-    environment:
-      name: production
-      url: http://dronefleet.dockops.local
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up kubectl
-        uses: azure/setup-kubectl@v3
-        with:
-          version: "v1.30.0"
-
-      - name: Configure kubeconfig
-        run: |
-          mkdir -p $HOME/.kube
-          echo "${{ secrets.KUBECONFIG_BASE64 }}" | base64 -d > $HOME/.kube/config
-          chmod 600 $HOME/.kube/config
-
-      - name: Ensure namespace exists
-        run: |
-          kubectl get namespace ${{ env.K8S_NAMESPACE }} || \
-          kubectl create namespace ${{ env.K8S_NAMESPACE }}
-
-      - name: Record current image (for rollback)
-        id: current-image
-        run: |
-          CURRENT=$(kubectl get deployment ${{ env.DEPLOYMENT_NAME }} \
-            -n ${{ env.K8S_NAMESPACE }} \
-            -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || echo "none")
-          echo "image=${CURRENT}" >> $GITHUB_OUTPUT
-          echo "Previous image: ${CURRENT}"
-
-      - name: Apply K8s manifests
-        run: |
-          kubectl apply -f k8s/base/deployment.yaml \
-            -n ${{ env.K8S_NAMESPACE }}
-
-      - name: Update image to new SHA
-        run: |
-          kubectl set image deployment/${{ env.DEPLOYMENT_NAME }} \
-            dronefleet=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.build-and-push.outputs.image-tag }} \
-            -n ${{ env.K8S_NAMESPACE }}
-
-      - name: Wait for rollout
-        run: |
-          kubectl rollout status deployment/${{ env.DEPLOYMENT_NAME }} \
-            -n ${{ env.K8S_NAMESPACE }} \
-            --timeout=120s
-
-      - name: Deployment summary
-        run: |
-          echo "### Deployment Complete" >> $GITHUB_STEP_SUMMARY
-          echo "| | |" >> $GITHUB_STEP_SUMMARY
-          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
-          echo "| Namespace | \`${{ env.K8S_NAMESPACE }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| Deployment | \`${{ env.DEPLOYMENT_NAME }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| New image | \`${{ needs.build-and-push.outputs.image-tag }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| Previous image | \`${{ steps.current-image.outputs.image }}\` |" >> $GITHUB_STEP_SUMMARY
-
-  # ── 6. SMOKE TEST ───────────────────────────────────────────
-  smoke-test:
-    name: Smoke Test
-    runs-on: ubuntu-latest
-    needs: deploy
-    outputs:
-      passed: ${{ steps.smoke.outputs.passed }}
-    steps:
-      - name: Configure kubectl
-        run: |
-          mkdir -p $HOME/.kube
-          echo "${{ secrets.KUBECONFIG_BASE64 }}" | base64 -d > $HOME/.kube/config
-          chmod 600 $HOME/.kube/config
-
-      - name: Port-forward and run smoke tests
-        id: smoke
-        run: |
-          # Port-forward in background
-          kubectl port-forward \
-            svc/dronefleet-svc 18080:80 \
-            -n ${{ env.K8S_NAMESPACE }} &
-          PF_PID=$!
-          sleep 5
-
-          PASS=true
-
-          check() {
-            local url=$1
-            local expected=$2
-            local resp=$(curl -sf "http://localhost:18080${url}" || echo "FAILED")
-            if echo "$resp" | grep -q "$expected"; then
-              echo "PASS: ${url} contains '${expected}'"
-            else
-              echo "FAIL: ${url} — expected '${expected}', got: ${resp}"
-              PASS=false
-            fi
-          }
-
-          # Core health checks
-          check "/health"        "ok"
-          check "/ready"         "ready"
-
-          # Fleet API
-          check "/api/v1/fleet"  "drones"
-
-          # Mission API
-          check "/api/v1/missions" "missions"
-
-          kill $PF_PID 2>/dev/null || true
-
-          if [ "$PASS" = "true" ]; then
-            echo "passed=true" >> $GITHUB_OUTPUT
-            echo "All smoke tests passed."
-          else
-            echo "passed=false" >> $GITHUB_OUTPUT
-            echo "Smoke tests FAILED."
-            exit 1
-          fi
-
-  # ── 7. ROLLBACK ─────────────────────────────────────────────
-  rollback:
-    name: Rollback
-    runs-on: ubuntu-latest
-    needs: [deploy, smoke-test]
-    # Only runs if smoke test failed
-    if: failure() && needs.smoke-test.outputs.passed == 'false'
-    steps:
-      - name: Configure kubectl
-        run: |
-          mkdir -p $HOME/.kube
-          echo "${{ secrets.KUBECONFIG_BASE64 }}" | base64 -d > $HOME/.kube/config
-          chmod 600 $HOME/.kube/config
-
-      - name: Rollback deployment
-        run: |
-          echo "Smoke test failed — initiating rollback..."
-          kubectl rollout undo deployment/${{ env.DEPLOYMENT_NAME }} \
-            -n ${{ env.K8S_NAMESPACE }}
-          kubectl rollout status deployment/${{ env.DEPLOYMENT_NAME }} \
-            -n ${{ env.K8S_NAMESPACE }} \
-            --timeout=60s
-          echo "Rollback complete."
-
-      - name: Rollback summary
-        run: |
-          echo "### ROLLBACK EXECUTED" >> $GITHUB_STEP_SUMMARY
-          echo "Smoke tests failed. Deployment rolled back to previous version." >> $GITHUB_STEP_SUMMARY
-
-  # ── 8. NOTIFY ───────────────────────────────────────────────
-  notify:
-    name: Notify
-    runs-on: ubuntu-latest
-    needs: [build-and-push, deploy, smoke-test]
-    if: always() && github.ref == 'refs/heads/main'
-    steps:
-      - name: Determine status
-        id: status
-        run: |
-          if [[ "${{ needs.smoke-test.result }}" == "success" ]]; then
-            echo "emoji=✅" >> $GITHUB_OUTPUT
-            echo "text=Deployment succeeded" >> $GITHUB_OUTPUT
-            echo "color=good" >> $GITHUB_OUTPUT
-          elif [[ "${{ needs.smoke-test.result }}" == "failure" ]]; then
-            echo "emoji=🔴" >> $GITHUB_OUTPUT
-            echo "text=Deployment FAILED — rollback initiated" >> $GITHUB_OUTPUT
-            echo "color=danger" >> $GITHUB_OUTPUT
-          else
-            echo "emoji=⚠️" >> $GITHUB_OUTPUT
-            echo "text=Deployment status unknown" >> $GITHUB_OUTPUT
-            echo "color=warning" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Send Slack notification
-        if: env.SLACK_WEBHOOK_URL != ''
+      - name: Update Helm image tag
+        uses: mikefarah/yq@v4.44.3
         env:
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          IMAGE_TAG: ${{ steps.payload.outputs.short-sha }}
+        with:
+          cmd: yq -i '.image.tag = strenv(IMAGE_TAG)' deploy/${{ env.VALUES_FILE }}
+
+      - name: Commit Helm values change
+        env:
+          IMAGE: ${{ steps.payload.outputs.image }}
+          IMAGE_TAG: ${{ steps.payload.outputs.short-sha }}
         run: |
-          curl -s -X POST "$SLACK_WEBHOOK_URL" \
-            -H "Content-Type: application/json" \
-            -d '{
-              "attachments": [{
-                "color": "${{ steps.status.outputs.color }}",
-                "blocks": [
-                  {
-                    "type": "section",
-                    "text": {
-                      "type": "mrkdwn",
-                      "text": "${{ steps.status.outputs.emoji }} *DockOps — DroneFleet Deploy*\n${{ steps.status.outputs.text }}"
-                    }
-                  },
-                  {
-                    "type": "section",
-                    "fields": [
-                      { "type": "mrkdwn", "text": "*Repo:*\n`${{ github.repository }}`" },
-                      { "type": "mrkdwn", "text": "*Branch:*\n`${{ github.ref_name }}`" },
-                      { "type": "mrkdwn", "text": "*Commit:*\n`${{ github.sha }}`" },
-                      { "type": "mrkdwn", "text": "*Image tag:*\n`${{ needs.build-and-push.outputs.image-tag }}`" },
-                      { "type": "mrkdwn", "text": "*Triggered by:*\n`${{ github.actor }}`" },
-                      { "type": "mrkdwn", "text": "*Run:*\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View details>" }
-                    ]
-                  }
-                ]
-              }]
-            }'
+          cd deploy
+
+          if git diff --quiet -- "$VALUES_FILE"; then
+            echo "${VALUES_FILE} already points at ${IMAGE}."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$VALUES_FILE"
+          git commit -m "chore(dronefleet): deploy image ${IMAGE_TAG}"
+          git push origin "HEAD:${DEPLOY_BRANCH}"
+
+      - name: Summary
+        run: |
+          echo "### DroneFleet release" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- App repository: \`${{ steps.payload.outputs.app-repository }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- App commit: \`${{ steps.payload.outputs.commit-sha }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Image: \`${{ steps.payload.outputs.image }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Image digest: \`${{ steps.build.outputs.digest }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Updated file: \`${{ env.VALUES_FILE }}\`" >> "$GITHUB_STEP_SUMMARY"

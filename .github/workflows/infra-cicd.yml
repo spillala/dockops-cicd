@@ -13,6 +13,7 @@ on:
     paths:
       - "k8s/**"
       - "helm/**"
+      - "!helm/dronefleet/values.yaml"
       - ".github/workflows/infra-cicd.yml"
   pull_request:
     branches:
@@ -20,6 +21,7 @@ on:
     paths:
       - "k8s/**"
       - "helm/**"
+      - "!helm/dronefleet/values.yaml"
 
 env:
   K8S_NAMESPACE: dronefleet

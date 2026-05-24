@@ -2,8 +2,11 @@ replicaCount: 2
 
 image:
   repository: ghcr.io/spillala/dronefleet
-  pullPolicy: IfNotPresent
+  # !! THIS FIELD IS MANAGED BY CI !!
+  # drone-app-cicd.yml updates this via yq on every successful build.
+  # Do not change manually — your change will be overwritten on next deploy.
   tag: "latest"
+  pullPolicy: IfNotPresent
 
 nameOverride: ""
 fullnameOverride: "dronefleet"
@@ -20,7 +23,7 @@ env:
   MAX_FLEET_SIZE: "50"
   TELEMETRY_BUFFER: "100"
 
-# Set via --set or secret injection in CI
+# Set via K8s secret — see k8s/base/deployment.yaml secretKeyRef
 databaseUrl: ""
 
 resources:
