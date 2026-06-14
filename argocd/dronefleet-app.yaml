@@ -1,0 +1,24 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: dronefleet
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/spillala/dockops-cicd.git
+    targetRevision: main
+    path: helm/dronefleet
+    helm:
+      releaseName: dronefleet
+      valueFiles:
+        - values.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: dronefleet
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
