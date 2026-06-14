@@ -8,6 +8,8 @@ image:
   tag: "latest"
   pullPolicy: IfNotPresent
 
+imagePullSecrets:
+  - name: ghcr-pull-secret
 nameOverride: ""
 fullnameOverride: "dronefleet"
 
