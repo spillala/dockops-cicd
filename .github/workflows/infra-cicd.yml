@@ -2,6 +2,9 @@
 #  DockOps — Infrastructure CI/CD Pipeline
 #  Validates and deploys K8s manifests separately from app code.
 #  AI agent verifies cluster health after every infra change.
+#  Provider is pluggable: Anthropic Claude by default, or any
+#  OpenAI-compatible endpoint (Ollama, vLLM, LocalAI, ...) via
+#  the AI_VERIFY_PROVIDER repo variable — see README.md.
 # ============================================================
 
 name: Infrastructure CI/CD
@@ -121,25 +124,39 @@ jobs:
 
       - name: Run AI health verification
         env:
+          # 'anthropic' (default, needs ANTHROPIC_API_KEY) or 'openai_compatible' —
+          # the latter talks to any server that speaks the OpenAI chat-completions
+          # schema: Ollama, vLLM, LocalAI, LM Studio, text-generation-webui, etc.
+          # Switch providers with a repo variable, no code change required.
+          AI_VERIFY_PROVIDER: ${{ vars.AI_VERIFY_PROVIDER || 'anthropic' }}
+          AI_VERIFY_MODEL: ${{ vars.AI_VERIFY_MODEL }}
+          AI_VERIFY_BASE_URL: ${{ vars.AI_VERIFY_BASE_URL }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
           python3 << 'PYEOF'
           import json, urllib.request, urllib.error, os, sys
 
-          api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-          if not api_key:
-              print("ANTHROPIC_API_KEY not set — skipping AI verification")
+          DEFAULT_MODELS = {
+              "anthropic": "claude-sonnet-4-20250514",
+              "openai_compatible": "llama3.1",
+          }
+          DEFAULT_BASE_URLS = {
+              "openai_compatible": "http://localhost:11434/v1",
+          }
+
+          provider = os.environ.get("AI_VERIFY_PROVIDER", "anthropic").strip().lower()
+          if provider not in DEFAULT_MODELS:
+              print(f"AI_VERIFY_PROVIDER={provider!r} is not 'anthropic' or "
+                    f"'openai_compatible' — skipping AI verification")
               sys.exit(0)
+
+          model = os.environ.get("AI_VERIFY_MODEL") or DEFAULT_MODELS[provider]
 
           with open("/tmp/cluster-state.json") as f:
               state = f.read()
 
-          payload = json.dumps({
-              "model": "claude-sonnet-4-20250514",
-              "max_tokens": 1000,
-              "messages": [{
-                  "role": "user",
-                  "content": f"""You are DockOps AI SRE. Analyse this Kubernetes cluster state after an infra deployment.
+          prompt = f"""You are DockOps AI SRE. Analyse this Kubernetes cluster state after an infra deployment.
 
           Cluster state:
           {state}
@@ -156,38 +173,66 @@ jobs:
             "issues": ["list of issues found, empty if none"],
             "recommendation": "brief action if FAIL, or 'No action needed' if PASS"
           }}"""
-              }]
-          }).encode()
 
-          req = urllib.request.Request(
-              "https://api.anthropic.com/v1/messages",
-              data=payload,
-              headers={
-                  "Content-Type": "application/json",
-                  "x-api-key": api_key,
-                  "anthropic-version": "2023-06-01"
-              }
-          )
-
-          try:
+          def call_anthropic():
+              api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+              if not api_key:
+                  print("ANTHROPIC_API_KEY not set — skipping AI verification")
+                  sys.exit(0)
+              payload = json.dumps({
+                  "model": model,
+                  "max_tokens": 1000,
+                  "messages": [{"role": "user", "content": prompt}],
+              }).encode()
+              req = urllib.request.Request(
+                  "https://api.anthropic.com/v1/messages",
+                  data=payload,
+                  headers={
+                      "Content-Type": "application/json",
+                      "x-api-key": api_key,
+                      "anthropic-version": "2023-06-01",
+                  },
+              )
               with urllib.request.urlopen(req, timeout=30) as resp:
                   data = json.loads(resp.read())
-                  text = data["content"][0]["text"]
-                  result = json.loads(text)
+                  return data["content"][0]["text"]
 
-                  print(f"AI Verdict: {result['verdict']}")
-                  if result["issues"]:
-                      print("Issues found:")
-                      for issue in result["issues"]:
-                          print(f"  - {issue}")
-                  print(f"Recommendation: {result['recommendation']}")
+          def call_openai_compatible():
+              base_url = (os.environ.get("AI_VERIFY_BASE_URL") or DEFAULT_BASE_URLS[provider]).rstrip("/")
+              api_key = os.environ.get("OPENAI_API_KEY", "")  # most self-hosted servers don't need one
+              headers = {"Content-Type": "application/json"}
+              if api_key:
+                  headers["Authorization"] = f"Bearer {api_key}"
+              payload = json.dumps({
+                  "model": model,
+                  "messages": [{"role": "user", "content": prompt}],
+                  "stream": False,
+              }).encode()
+              req = urllib.request.Request(f"{base_url}/chat/completions", data=payload, headers=headers)
+              with urllib.request.urlopen(req, timeout=60) as resp:
+                  data = json.loads(resp.read())
+                  return data["choices"][0]["message"]["content"]
 
-                  if result["verdict"] == "FAIL":
-                      print("AI verification FAILED — check issues above")
-                      sys.exit(1)
-                  else:
-                      print("AI verification PASSED — cluster is healthy")
+          try:
+              text = call_anthropic() if provider == "anthropic" else call_openai_compatible()
+              result = json.loads(text)
 
+              print(f"Provider: {provider} ({model})")
+              print(f"AI Verdict: {result['verdict']}")
+              if result["issues"]:
+                  print("Issues found:")
+                  for issue in result["issues"]:
+                      print(f"  - {issue}")
+              print(f"Recommendation: {result['recommendation']}")
+
+              if result["verdict"] == "FAIL":
+                  print("AI verification FAILED — check issues above")
+                  sys.exit(1)
+              else:
+                  print("AI verification PASSED — cluster is healthy")
+
+          except SystemExit:
+              raise
           except Exception as e:
               print(f"AI verification error: {e} — continuing without AI check")
               sys.exit(0)
