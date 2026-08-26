@@ -25,6 +25,26 @@ k8s/**, helm/** changes (excluding the CI-managed values.yaml)
          health verdict on the rollout (provider is pluggable, see below)
 ```
 
+## Local cluster setup
+
+From a fresh Ubuntu box to a running, GitOps-managed `dronefleet`:
+
+```bash
+./scripts/bootstrap-ubuntu.sh      # installs MicroK8s + Helm (needs sudo, one-time)
+# log out/in, then: newgrp microk8s && microk8s status --wait-ready
+
+./scripts/bootstrap-cluster.sh     # addons, namespaces, Argo CD, the dronefleet Application
+
+GHCR_USERNAME=<you> GHCR_TOKEN=<PAT with read:packages> \
+  ./scripts/create-ghcr-pull-secret.sh dronefleet
+```
+
+Argo CD then takes over: it syncs `helm/dronefleet` from this repo automatically, and `drone-app-cicd.yml` keeps `values.yaml` pointed at the latest image whenever `dronefleet` changes. Get the Argo CD admin password (first login only) with:
+
+```bash
+microk8s kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d
+```
+
 ## Repository Layout
 
 ```text
@@ -32,7 +52,10 @@ argocd/dronefleet-app.yaml   Argo CD Application manifest for dronefleet
 helm/dronefleet/             Helm chart Argo CD deploys (values.yaml image.tag is CI-managed)
 k8s/base/                    Raw manifests (namespace, deployment, service) validated/applied by infra-cicd.yml
 docs/images/                 Argo CD screenshots referenced from this README
-scripts/bootstrap-ubuntu.sh  Installs MicroK8s + tooling on a fresh Ubuntu box
+scripts/
+  bootstrap-ubuntu.sh          Installs MicroK8s + Helm on a fresh Ubuntu box
+  bootstrap-cluster.sh         Enables addons, installs Argo CD, applies the dronefleet Application
+  create-ghcr-pull-secret.sh   (Re)creates the ghcr-pull-secret used to pull the dronefleet image
 .github/workflows/
   drone-app-cicd.yml         Builds/pushes the dronefleet image, updates Helm values (triggered by dronefleet's repository_dispatch)
   infra-cicd.yml             Validates + applies k8s manifests, runs the AI-based cluster health check
@@ -52,6 +75,15 @@ scripts/bootstrap-ubuntu.sh  Installs MicroK8s + tooling on a fresh Ubuntu box
 - Liveness/readiness probes on `/healthz` and `/readyz`
 - `DATABASE_URL` optional via secret `dronefleet-secrets` — falls back to dronefleet's in-memory store if unset
 - Runs as non-root (uid 65532), read-only root filesystem, all capabilities dropped
+- Pulls the image using `imagePullSecrets: ghcr-pull-secret` (namespace `dronefleet`) — the `ghcr.io` package is private, so every cluster needs this secret populated with real credentials before a new image tag can be pulled. Create or rotate it with:
+
+  ```bash
+  GHCR_USERNAME=<your-github-username> \
+  GHCR_TOKEN=<classic PAT with the read:packages scope> \
+  ./scripts/create-ghcr-pull-secret.sh dronefleet
+  ```
+
+  `imagePullPolicy: IfNotPresent` means a broken or missing secret won't show up until a *new* tag needs pulling — an already-cached tag on the node keeps running regardless. Don't take a healthy-looking pod as proof this secret is valid.
 
 ## AI cluster health check — configuration
 

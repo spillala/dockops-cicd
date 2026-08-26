@@ -22,5 +22,5 @@ echo "Important: log out and log back in before using microk8s without sudo."
 echo "Then run:"
 echo "  newgrp microk8s"
 echo "  microk8s status --wait-ready"
-echo "  make bootstrap-local"
+echo "  ./scripts/bootstrap-cluster.sh"
 
