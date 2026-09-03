@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: dronefleet-agent-ollama-models
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: dronefleet-agent-ollama
+    part-of: dockops
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{ .Values.ollama.storage }}

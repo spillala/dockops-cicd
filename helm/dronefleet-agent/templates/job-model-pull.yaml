@@ -1,0 +1,37 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: dronefleet-agent-ollama-pull-{{ .Release.Revision }}
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: dronefleet-agent-ollama
+    part-of: dockops
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "1"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        app: dronefleet-agent-ollama-pull
+    spec:
+      restartPolicy: Never
+      initContainers:
+        - name: wait-for-ollama
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - until nc -z dronefleet-agent-ollama-svc 11434; do echo waiting for ollama; sleep 3; done
+      containers:
+        - name: pull
+          image: {{ .Values.ollama.modelPullJobImage }}
+          env:
+            - name: OLLAMA_HOST
+              value: dronefleet-agent-ollama-svc:11434
+          command:
+            - ollama
+            - pull
+            - {{ .Values.agent.ollamaModel }}

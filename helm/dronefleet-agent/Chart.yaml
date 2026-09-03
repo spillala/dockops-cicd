@@ -1,0 +1,14 @@
+apiVersion: v2
+name: dronefleet-agent
+description: Agent 1 — autonomous fault diagnosis for DroneFleet, plus its Ollama runtime
+type: application
+version: 0.1.0
+appVersion: "latest"
+keywords:
+  - dronefleet
+  - dockops
+  - agent
+  - mcp
+home: https://github.com/spillala/dronefleet-agent
+sources:
+  - https://github.com/spillala/dronefleet-agent

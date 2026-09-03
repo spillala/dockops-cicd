@@ -1,0 +1,45 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dronefleet-agent-ollama
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: dronefleet-agent-ollama
+    part-of: dockops
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate # a rolling update would need 2x the model's memory footprint at once
+  selector:
+    matchLabels:
+      app: dronefleet-agent-ollama
+  template:
+    metadata:
+      labels:
+        app: dronefleet-agent-ollama
+    spec:
+      containers:
+        - name: ollama
+          image: {{ .Values.ollama.image }}
+          ports:
+            - containerPort: 11434
+              name: http
+          volumeMounts:
+            - name: models
+              mountPath: /root/.ollama
+          resources:
+            {{- toYaml .Values.ollama.resources | nindent 12 }}
+          readinessProbe:
+            tcpSocket:
+              port: 11434
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: 11434
+            initialDelaySeconds: 15
+            periodSeconds: 20
+      volumes:
+        - name: models
+          persistentVolumeClaim:
+            claimName: dronefleet-agent-ollama-models

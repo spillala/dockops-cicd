@@ -1,0 +1,143 @@
+name: DroneFleet Agent CI/CD
+
+on:
+  repository_dispatch:
+    types:
+      - dronefleet-agent-updated
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  APP_REPOSITORY: spillala/dronefleet-agent
+  DEPLOY_BRANCH: main
+  IMAGE_REPOSITORY: ghcr.io/spillala/dronefleet-agent
+  VALUES_FILE: helm/dronefleet-agent/values.yaml
+
+jobs:
+  build-push-and-update-values:
+    name: Build Image and Update Helm Values
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate dispatch payload
+        id: payload
+        env:
+          PAYLOAD_REPOSITORY: ${{ github.event.client_payload.repository }}
+          PAYLOAD_COMMIT_SHA: ${{ github.event.client_payload.commit_sha }}
+          PAYLOAD_BRANCH: ${{ github.event.client_payload.branch }}
+        run: |
+          APP_REPOSITORY="${PAYLOAD_REPOSITORY:-${APP_REPOSITORY}}"
+          COMMIT_SHA="${PAYLOAD_COMMIT_SHA}"
+          SOURCE_BRANCH="${PAYLOAD_BRANCH:-unknown}"
+
+          if [ -z "$COMMIT_SHA" ]; then
+            echo "repository_dispatch payload is missing client_payload.commit_sha."
+            exit 1
+          fi
+
+          SHORT_SHA="$(printf '%s' "$COMMIT_SHA" | cut -c1-7)"
+          BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+          echo "app-repository=${APP_REPOSITORY}" >> "$GITHUB_OUTPUT"
+          echo "commit-sha=${COMMIT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "short-sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "source-branch=${SOURCE_BRANCH}" >> "$GITHUB_OUTPUT"
+          echo "build-time=${BUILD_TIME}" >> "$GITHUB_OUTPUT"
+          echo "image=${IMAGE_REPOSITORY}:${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout dronefleet-agent
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ steps.payload.outputs.app-repository }}
+          ref: ${{ steps.payload.outputs.commit-sha }}
+          path: app
+
+      - name: Checkout DockOps GitOps repo
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.DEPLOY_BRANCH }}
+          path: deploy
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: app/go.mod
+          cache: true
+          cache-dependency-path: app/go.sum
+
+      - name: Lint
+        working-directory: app
+        run: |
+          UNFORMATTED="$(gofmt -l .)"
+          if [ -n "$UNFORMATTED" ]; then
+            echo "Go files need formatting:"
+            echo "$UNFORMATTED"
+            exit 1
+          fi
+
+          go vet ./...
+
+      - name: Test
+        working-directory: app
+        run: go test ./...
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push dronefleet-agent image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: app
+          file: app/Dockerfile
+          push: true
+          tags: |
+            ${{ steps.payload.outputs.image }}
+            ${{ env.IMAGE_REPOSITORY }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: true
+          sbom: true
+
+      - name: Update Helm image tag
+        uses: mikefarah/yq@v4.44.3
+        env:
+          IMAGE_TAG: ${{ steps.payload.outputs.short-sha }}
+        with:
+          cmd: yq -i '.agent.image.tag = strenv(IMAGE_TAG)' deploy/${{ env.VALUES_FILE }}
+
+      - name: Commit Helm values change
+        env:
+          IMAGE: ${{ steps.payload.outputs.image }}
+          IMAGE_TAG: ${{ steps.payload.outputs.short-sha }}
+        run: |
+          cd deploy
+
+          if git diff --quiet -- "$VALUES_FILE"; then
+            echo "${VALUES_FILE} already points at ${IMAGE}."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$VALUES_FILE"
+          git commit -m "chore(dronefleet-agent): deploy image ${IMAGE_TAG}"
+          git push origin "HEAD:${DEPLOY_BRANCH}"
+
+      - name: Summary
+        run: |
+          echo "### DroneFleet Agent release" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- App repository: \`${{ steps.payload.outputs.app-repository }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- App commit: \`${{ steps.payload.outputs.commit-sha }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Image: \`${{ steps.payload.outputs.image }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Image digest: \`${{ steps.build.outputs.digest }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Updated file: \`${{ env.VALUES_FILE }}\`" >> "$GITHUB_STEP_SUMMARY"

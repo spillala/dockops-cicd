@@ -1,0 +1,52 @@
+namespace: dronefleet-agent
+
+agent:
+  replicaCount: 1 # a singleton reconciler, not a stateless API — more replicas would just duplicate diagnosis work
+  image:
+    repository: ghcr.io/spillala/dronefleet-agent
+    # !! THIS FIELD IS MANAGED BY CI !!
+    # dronefleet-agent-cicd.yml updates this via yq on every successful build.
+    tag: "latest"
+    pullPolicy: IfNotPresent
+  imagePullSecrets:
+    - name: ghcr-pull-secret
+  watchInterval: 5m
+  dronefleetUrl: http://dronefleet-svc.dronefleet:80
+  ollamaUrl: http://dronefleet-agent-ollama-svc:11434
+  ollamaModel: "gemma4:e2b-it-q4_K_M"
+  healthPort: 8081
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 300m
+      memory: 256Mi
+  livenessProbe:
+    httpGet:
+      path: /healthz
+      port: 8081
+    initialDelaySeconds: 5
+    periodSeconds: 10
+  readinessProbe:
+    httpGet:
+      path: /readyz
+      port: 8081
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    failureThreshold: 6 # MCP handshake + first tool call can take a few seconds
+
+ollama:
+  image: ollama/ollama:latest
+  # Small enough to actually fit this cluster's node (single laptop, ~15Gi
+  # allocatable, shared with everything else). Use gemma4:e4b-it-q4_K_M on a
+  # bigger node instead — see dronefleet-agent's own README for the cutoffs.
+  modelPullJobImage: ollama/ollama:latest
+  resources:
+    requests:
+      cpu: "1"
+      memory: 8Gi
+    limits:
+      cpu: "3"
+      memory: 9Gi
+  storage: 12Gi
