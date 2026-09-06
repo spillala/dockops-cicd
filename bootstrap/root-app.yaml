@@ -1,0 +1,30 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: dockops-apps
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/spillala/dockops-cicd.git
+    targetRevision: main
+    # App-of-apps root: every *-app.yaml Application manifest dropped in
+    # argocd/ gets applied automatically on the next sync — no manual
+    # `kubectl apply` needed for new apps after this root is bootstrapped
+    # once. This manifest deliberately lives outside argocd/ itself
+    # (in bootstrap/) — a root Application managing a directory that
+    # contains its own manifest causes a perpetual Synced/OutOfSync flap,
+    # since every sync re-applies (and so changes) the very object being
+    # diffed.
+    path: argocd
+    directory:
+      recurse: false
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
