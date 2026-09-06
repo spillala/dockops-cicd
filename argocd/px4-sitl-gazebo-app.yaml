@@ -1,0 +1,24 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: px4-sitl-gazebo
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/spillala/dockops-cicd.git
+    targetRevision: main
+    path: helm/px4-sitl-gazebo
+    helm:
+      releaseName: px4-sitl-gazebo
+      valueFiles:
+        - values.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: px4-sitl-gazebo
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true

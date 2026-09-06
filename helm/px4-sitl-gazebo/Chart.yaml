@@ -1,0 +1,16 @@
+apiVersion: v2
+name: px4-sitl-gazebo
+description: PX4 SITL + Gazebo Harmonic simulator (prebuilt upstream image, no in-cluster build)
+type: application
+version: 0.1.0
+appVersion: "v1.18.0-beta2"
+keywords:
+  - dronefleet
+  - dockops
+  - simulation
+  - px4
+  - gazebo
+home: https://github.com/PX4/PX4-Autopilot
+sources:
+  - https://github.com/PX4/PX4-Autopilot
+  - https://hub.docker.com/r/px4io/px4-sitl-gazebo
