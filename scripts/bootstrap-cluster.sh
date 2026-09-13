@@ -34,6 +34,10 @@ Cluster bootstrap complete. Still needed before the first real deploy:
      this exists, and the bundled Postgres pod won't start without it:
        POSTGRES_PASSWORD=<pick one> ./scripts/create-postgres-secret.sh dronefleet
 
-  3. Argo CD admin password, for UI/CLI login:
+  3. GHCR image pull secret in the px4-sitl-gazebo namespace too — the
+     mavlink-bridge sidecar pulls from GHCR just like dronefleet does:
+       GHCR_USERNAME=<you> GHCR_TOKEN=<PAT with read:packages> ./scripts/create-ghcr-pull-secret.sh px4-sitl-gazebo
+
+  4. Argo CD admin password, for UI/CLI login:
        $KUBECTL -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d
 EOF

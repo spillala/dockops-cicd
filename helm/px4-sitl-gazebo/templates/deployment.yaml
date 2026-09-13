@@ -16,6 +16,10 @@ spec:
       labels:
         app: px4-sitl-gazebo
     spec:
+      {{- if .Values.mavlinkBridge.enabled }}
+      imagePullSecrets:
+        - name: ghcr-pull-secret
+      {{- end }}
       containers:
         - name: px4-sitl-gazebo
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
@@ -29,9 +33,45 @@ spec:
             - name: PX4_GZ_WORLD
               value: {{ .Values.gzWorld | quote }}
             {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+        {{- if .Values.mavlinkBridge.enabled }}
+        # PX4 sends its MAVLink stream out to its own loopback
+        # (127.0.0.1:14550), it does not listen for a GCS to connect — so
+        # mavlink-bridge has to share this Pod's network namespace, not run
+        # as a separate Deployment behind px4-sitl-gazebo-svc. Verified
+        # against the live cluster; see mavlink-bridge's
+        # docs/decisions/0003-udp-server-sidecar-not-client.md.
+        - name: mavlink-bridge
+          image: "{{ .Values.mavlinkBridge.image.repository }}:{{ .Values.mavlinkBridge.image.tag }}"
+          imagePullPolicy: {{ .Values.mavlinkBridge.image.pullPolicy }}
           ports:
             - name: mavlink
               containerPort: {{ .Values.mavlink.port }}
               protocol: UDP
+          env:
+            - name: MAVLINK_ADDRESS
+              value: ":{{ .Values.mavlink.port }}"
+            - name: DRONEFLEET_URL
+              value: {{ .Values.mavlinkBridge.dronefleetUrl | quote }}
+            - name: DRONE_ID
+              value: {{ .Values.mavlinkBridge.droneId | quote }}
+            - name: HEARTBEAT_STALE
+              value: {{ .Values.mavlinkBridge.heartbeatStale | quote }}
+            - name: HEALTH_ADDR
+              value: ":{{ .Values.mavlinkBridge.healthPort }}"
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: {{ .Values.mavlinkBridge.healthPort }}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: {{ .Values.mavlinkBridge.healthPort }}
+            initialDelaySeconds: 3
+            periodSeconds: 5
           resources:
-            {{- toYaml .Values.resources | nindent 12 }}
+            {{- toYaml .Values.mavlinkBridge.resources | nindent 12 }}
+        {{- end }}

@@ -78,7 +78,7 @@ argocd/dronefleet-agent-app.yaml   Argo CD Application manifest for dronefleet-a
 argocd/px4-sitl-gazebo-app.yaml    Argo CD Application manifest for the PX4 SITL + Gazebo simulator
 helm/dronefleet/             Helm chart Argo CD deploys (values.yaml image.tag is CI-managed; bundles Postgres + a migration Job)
 helm/dronefleet-agent/       Helm chart for dronefleet-agent + its Ollama deployment
-helm/px4-sitl-gazebo/        Helm chart wrapping the prebuilt px4io/px4-sitl-gazebo image — no in-cluster build
+helm/px4-sitl-gazebo/        Helm chart wrapping the prebuilt px4io/px4-sitl-gazebo image — no in-cluster build; bundles mavlink-bridge as a sidecar
 k8s/base/                    Raw manifests (namespace, deployment, service) validated/applied by infra-cicd.yml
 docs/images/                 Argo CD screenshots referenced from this README
 scripts/
@@ -88,6 +88,8 @@ scripts/
   create-postgres-secret.sh    (Re)creates dronefleet-postgres-secret (postgres-password + database-url)
 .github/workflows/
   drone-app-cicd.yml         Builds/pushes the dronefleet image, updates Helm values (triggered by dronefleet's repository_dispatch)
+  dronefleet-agent-cicd.yml  Builds/pushes the dronefleet-agent image, updates Helm values (triggered by dronefleet-agent's repository_dispatch)
+  mavlink-bridge-cicd.yml    Builds/pushes the mavlink-bridge image, updates helm/px4-sitl-gazebo/values.yaml (triggered by mavlink-bridge's repository_dispatch)
   infra-cicd.yml             Validates + applies k8s manifests, runs the AI-based cluster health check
 ```
 
@@ -125,9 +127,10 @@ scripts/
 
 - Argo CD Application: `px4-sitl-gazebo`, namespace `argocd`, source path `helm/px4-sitl-gazebo`, destination namespace `px4-sitl-gazebo`
 - Image: `px4io/px4-sitl-gazebo:v1.18.0-beta2` — official prebuilt PX4 SITL + Gazebo Harmonic image, pinned (not `:latest`). No build step, in-cluster or otherwise.
-- Runs headless (`HEADLESS=1`), vehicle model `PX4_SIM_MODEL=gz_x500`, MAVLink exposed on UDP 14550 via `px4-sitl-gazebo-svc` (`ClusterIP` by default — switch `service.type` to `NodePort` in values.yaml for a QGroundControl/MAVSDK client outside the cluster)
+- Runs headless (`HEADLESS=1`), vehicle model `PX4_SIM_MODEL=gz_x500`. `px4-sitl-gazebo-svc` (`ClusterIP` by default — switch `service.type` to `NodePort` in values.yaml for a QGroundControl/MAVSDK client outside the cluster) still targets UDP 14550, but PX4 itself never listens there — see the `mavlinkBridge` bullet below.
 - Resources: requests 250m CPU / 512Mi memory, limits 2 CPU / 1536Mi memory — sized from a headless smoke-test run (~150Mi RSS idle single-vehicle). In practice the idle sim loop sustains close to the full 2-core CPU limit (Gazebo's physics tick, not a leak) — worth watching before adding more simulated vehicles on this node.
 - Supersedes an earlier from-source build (`PX4-Autopilot/Dockerfile.sitl`, now deleted): compiling ~1200 files with unbounded `ninja` parallelism drove this host into swap thrashing (load 250+, swap exhausted) and hung the machine. The prebuilt image sidesteps the problem entirely instead of tuning around it.
+- `mavlinkBridge` (guarded by `mavlinkBridge.enabled`, default on): a second container in this same Pod, `ghcr.io/spillala/mavlink-bridge`, image tag CI-managed by `mavlink-bridge-cicd.yml`. It binds a UDP **server** on `:14550` and reports flight state + `STATUSTEXT` fault causes to `dronefleet-svc` as `mavlinkBridge.droneId` (default `drone-004`). It has to share this Pod's network namespace — PX4 sends its MAVLink stream to its own loopback (`127.0.0.1:14550`) rather than listening for a client, confirmed by packet capture against the live cluster. See [`spillala/mavlink-bridge`](https://github.com/spillala/mavlink-bridge)'s `docs/decisions/0003-udp-server-sidecar-not-client.md`.
 
 ## AI cluster health check — configuration
 
