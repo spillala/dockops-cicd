@@ -76,7 +76,7 @@ bootstrap/root-app.yaml      App-of-apps root — the one Application applied ma
 argocd/dronefleet-app.yaml   Argo CD Application manifest for dronefleet
 argocd/dronefleet-agent-app.yaml   Argo CD Application manifest for dronefleet-agent (+ its Ollama runtime)
 argocd/px4-sitl-gazebo-app.yaml    Argo CD Application manifest for the PX4 SITL + Gazebo simulator
-helm/dronefleet/             Helm chart Argo CD deploys (values.yaml image.tag is CI-managed)
+helm/dronefleet/             Helm chart Argo CD deploys (values.yaml image.tag is CI-managed; bundles Postgres + a migration Job)
 helm/dronefleet-agent/       Helm chart for dronefleet-agent + its Ollama deployment
 helm/px4-sitl-gazebo/        Helm chart wrapping the prebuilt px4io/px4-sitl-gazebo image — no in-cluster build
 k8s/base/                    Raw manifests (namespace, deployment, service) validated/applied by infra-cicd.yml
@@ -85,6 +85,7 @@ scripts/
   bootstrap-ubuntu.sh          Installs MicroK8s + Helm on a fresh Ubuntu box
   bootstrap-cluster.sh         Enables addons, installs Argo CD, applies the dronefleet Application
   create-ghcr-pull-secret.sh   (Re)creates the ghcr-pull-secret used to pull the dronefleet image
+  create-postgres-secret.sh    (Re)creates dronefleet-postgres-secret (postgres-password + database-url)
 .github/workflows/
   drone-app-cicd.yml         Builds/pushes the dronefleet image, updates Helm values (triggered by dronefleet's repository_dispatch)
   infra-cicd.yml             Validates + applies k8s manifests, runs the AI-based cluster health check
@@ -102,7 +103,13 @@ scripts/
 - Image: `ghcr.io/spillala/dronefleet`, tag driven by CI (see `helm/dronefleet/values.yaml`)
 - 2 replicas, rolling update (`maxSurge: 1`, `maxUnavailable: 0`)
 - Liveness/readiness probes on `/healthz` and `/readyz`
-- `DATABASE_URL` optional via secret `dronefleet-secrets` — falls back to dronefleet's in-memory store if unset
+- `DATABASE_URL` optional via secret `dronefleet-postgres-secret` (key `database-url`) — falls back to dronefleet's in-memory store if the secret doesn't exist yet. **This secret does not exist until you create it** (see below); until then the "live" dronefleet is silently running in-memory, not against Postgres — don't assume otherwise just because the pod is healthy.
+- Bundled Postgres (`postgres:16-alpine`, single replica, `dronefleet-postgres-svc:5432`, one `ReadWriteOnce` PVC — `postgres.storage` in values.yaml) ships in the same `helm/dronefleet` chart, guarded by `postgres.enabled`. It starts empty; schema is applied by a `post-install,post-upgrade` Helm hook Job (`dronefleet-migrate-<revision>`) that runs `dronefleet`'s own `/app/migrate up` against it — see `dronefleet/db/migrations` and ADR `dronefleet/docs/decisions/0001-migrations-and-telemetry-fault-schema.md`.
+- Postgres's own password and the app's `database-url` both come from one secret, created out-of-band (never committed):
+
+  ```bash
+  POSTGRES_PASSWORD=<pick one> ./scripts/create-postgres-secret.sh dronefleet
+  ```
 - Runs as non-root (uid 65532), read-only root filesystem, all capabilities dropped
 - Pulls the image using `imagePullSecrets: ghcr-pull-secret` (namespace `dronefleet`) — the `ghcr.io` package is private, so every cluster needs this secret populated with real credentials before a new image tag can be pulled. Create or rotate it with:
 

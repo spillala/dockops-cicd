@@ -30,6 +30,10 @@ Cluster bootstrap complete. Still needed before the first real deploy:
   1. GHCR image pull secret (see README.md > Deployed workload):
        GHCR_USERNAME=<you> GHCR_TOKEN=<PAT with read:packages> ./scripts/create-ghcr-pull-secret.sh dronefleet
 
-  2. Argo CD admin password, for UI/CLI login:
+  2. Postgres secret — dronefleet falls back to its in-memory store until
+     this exists, and the bundled Postgres pod won't start without it:
+       POSTGRES_PASSWORD=<pick one> ./scripts/create-postgres-secret.sh dronefleet
+
+  3. Argo CD admin password, for UI/CLI login:
        $KUBECTL -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d
 EOF

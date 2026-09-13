@@ -1,0 +1,63 @@
+{{- if .Values.postgres.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dronefleet-postgres
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: dronefleet-postgres
+    part-of: dockops
+spec:
+  replicas: 1
+  # Single ReadWriteOnce PVC backs this — never scale this past 1 or run a
+  # rolling update strategy here; Recreate avoids two pods mounting it at once.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: dronefleet-postgres
+  template:
+    metadata:
+      labels:
+        app: dronefleet-postgres
+    spec:
+      containers:
+        - name: postgres
+          image: {{ .Values.postgres.image }}
+          ports:
+            - containerPort: 5432
+              name: postgres
+          env:
+            - name: POSTGRES_DB
+              value: {{ .Values.postgres.database | quote }}
+            - name: POSTGRES_USER
+              value: {{ .Values.postgres.user | quote }}
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.postgres.secretName }}
+                  key: postgres-password
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+              # subPath keeps the data directory itself empty of the
+              # lost+found dir some CSI drivers create at the PVC root,
+              # which trips Postgres's "data directory is not empty" check.
+              subPath: pgdata
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "{{ .Values.postgres.user }}"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "{{ .Values.postgres.user }}"]
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            {{- toYaml .Values.postgres.resources | nindent 12 }}
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: dronefleet-postgres-data
+{{- end }}

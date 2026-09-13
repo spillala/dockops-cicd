@@ -20,8 +20,24 @@ env:
   LOG_LEVEL: info
   MAX_FLEET_SIZE: "50"
   TELEMETRY_BUFFER: "100"
-# Set via K8s secret — see k8s/base/deployment.yaml secretKeyRef
-databaseUrl: ""
+
+postgres:
+  enabled: true
+  image: postgres:16-alpine
+  database: dronefleet
+  user: dronefleet
+  storage: 2Gi
+  # Created out-of-band via scripts/create-postgres-secret.sh, same pattern
+  # as ghcr-pull-secret — never commit the password or database-url here.
+  # Must contain keys "postgres-password" and "database-url".
+  secretName: dronefleet-postgres-secret
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
 resources:
   requests:
     cpu: 50m

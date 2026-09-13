@@ -1,0 +1,16 @@
+{{- if .Values.postgres.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: dronefleet-postgres-data
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: dronefleet-postgres
+    part-of: dockops
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{ .Values.postgres.storage }}
+{{- end }}
