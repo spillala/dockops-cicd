@@ -1,7 +1,5 @@
 namespace: px4-sitl-gazebo
-
 replicaCount: 1
-
 image:
   # Official prebuilt PX4 SITL + Gazebo Harmonic image — nothing is compiled
   # in-cluster or at image-build time. Pinned (not :latest) for reproducibility;
@@ -9,18 +7,14 @@ image:
   repository: px4io/px4-sitl-gazebo
   tag: "v1.18.0-beta2"
   pullPolicy: IfNotPresent
-
 simModel: gz_x500
 gzWorld: "" # empty = image default world
-
 mavlink:
   port: 14550
-
 service:
   # ClusterIP by default; switch to NodePort if you need QGroundControl or
   # another MAVLink client reachable directly from the host.
   type: ClusterIP
-
 resources:
   # Measured from a headless smoke test on this cluster's node (12 CPU /
   # ~15Gi allocatable, shared with dronefleet + dronefleet-agent/ollama):
@@ -33,14 +27,13 @@ resources:
   limits:
     cpu: "2"
     memory: 1536Mi
-
 mavlinkBridge:
   enabled: true
   image:
     repository: ghcr.io/spillala/mavlink-bridge
     # !! THIS FIELD IS MANAGED BY CI !!
     # mavlink-bridge-cicd.yml updates this via yq on every successful build.
-    tag: "latest"
+    tag: "2aaa273"
     pullPolicy: IfNotPresent
   # Which dronefleet drone this MAVLink system reports as. There's exactly
   # one simulated vehicle today; multi-vehicle mapping is a Phase E concern.
