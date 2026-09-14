@@ -5,7 +5,7 @@ agent:
     repository: ghcr.io/spillala/dronefleet-agent
     # !! THIS FIELD IS MANAGED BY CI !!
     # dronefleet-agent-cicd.yml updates this via yq on every successful build.
-    tag: "8580bca"
+    tag: "3f4c3b3"
     pullPolicy: IfNotPresent
   imagePullSecrets:
     - name: ghcr-pull-secret
