@@ -41,9 +41,14 @@ ollama:
   # bigger node instead — see dronefleet-agent's own README for the cutoffs.
   modelPullJobImage: ollama/ollama:latest
   resources:
+    # Request sized for the idle server (model unloaded between reconcile
+    # cycles via ollamaKeepAlive in agent.go), not the ~8GB RSS the model
+    # takes while resident. Limit stays high enough to cover that burst —
+    # a request this low used to reserve 8Gi continuously and helped starve
+    # the MicroK8s control plane's dqlite under memory pressure.
     requests:
-      cpu: "1"
-      memory: 8Gi
+      cpu: 200m
+      memory: 1Gi
     limits:
       cpu: "3"
       memory: 9Gi
