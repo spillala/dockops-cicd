@@ -40,4 +40,15 @@ Cluster bootstrap complete. Still needed before the first real deploy:
 
   4. Argo CD admin password, for UI/CLI login:
        $KUBECTL -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d
+
+  5. Calico CNI token refresh, as a cron job — the CNI plugin's kubeconfig
+     token has a 24h TTL and calico-node's built-in refresher has a known
+     upstream gap (projectcalico/calico#9235); without this, the cluster
+     silently stops scheduling new pods once a day. See
+     scripts/refresh-calico-cni-token.sh for why, and install it with:
+       mkdir -p ~/logs
+       ( echo "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin"; \\
+         crontab -l 2>/dev/null | grep -vF refresh-calico-cni-token.sh; \\
+         echo "0 */6 * * * $(pwd)/scripts/refresh-calico-cni-token.sh >> ~/logs/calico-token-refresh.log 2>&1" \\
+       ) | crontab -
 EOF
