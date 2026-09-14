@@ -59,6 +59,8 @@ From a fresh Ubuntu box to a running, GitOps-managed `dronefleet`:
 
 GHCR_USERNAME=<you> GHCR_TOKEN=<PAT with read:packages> \
   ./scripts/create-ghcr-pull-secret.sh dronefleet
+GHCR_USERNAME=<you> GHCR_TOKEN=<same PAT> \
+  ./scripts/create-ghcr-pull-secret.sh dronefleet-agent   # the agent namespace needs its own copy
 
 microk8s kubectl apply -f bootstrap/root-app.yaml   # one-time: enables auto-discovery for every other Application in argocd/
 ```
@@ -84,7 +86,7 @@ docs/images/                 Argo CD screenshots referenced from this README
 scripts/
   bootstrap-ubuntu.sh          Installs MicroK8s + Helm on a fresh Ubuntu box
   bootstrap-cluster.sh         Enables addons, installs Argo CD, applies the dronefleet Application
-  create-ghcr-pull-secret.sh   (Re)creates the ghcr-pull-secret used to pull the dronefleet image
+  create-ghcr-pull-secret.sh   (Re)creates the ghcr-pull-secret used to pull the dronefleet / dronefleet-agent images (run once per namespace)
   create-postgres-secret.sh    (Re)creates dronefleet-postgres-secret (postgres-password + database-url)
 .github/workflows/
   drone-app-cicd.yml         Builds/pushes the dronefleet image, updates Helm values (triggered by dronefleet's repository_dispatch)
@@ -121,7 +123,22 @@ scripts/
   ./scripts/create-ghcr-pull-secret.sh dronefleet
   ```
 
-  `imagePullPolicy: IfNotPresent` means a broken or missing secret won't show up until a *new* tag needs pulling — an already-cached tag on the node keeps running regardless. Don't take a healthy-looking pod as proof this secret is valid.
+  `imagePullPolicy: IfNotPresent` means a broken or missing secret won't show up until a *new* tag needs pulling — an already-cached tag on the node keeps running regardless. Don't take a healthy-looking pod as proof this secret is valid. (This bit for real on 2026-09-14: the PAT had expired weeks earlier and nothing noticed until the first genuinely new `dronefleet-agent` tag hit `ErrImagePull`.) To check without waiting for a rollout:
+
+  ```bash
+  TOKEN=$(microk8s kubectl get secret ghcr-pull-secret -n dronefleet -o jsonpath='{.data.\.dockerconfigjson}' \
+    | base64 -d | python3 -c "import json,sys,base64; print(base64.b64decode(json.load(sys.stdin)['auths']['ghcr.io']['auth']).decode().split(':',1)[1])")
+  curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: token $TOKEN" https://api.github.com/user   # 200 = valid, 401 = rotate it
+  ```
+
+## dronefleet-agent + Ollama
+
+- Argo CD Application: `dronefleet-agent`, source path `helm/dronefleet-agent`, destination namespace `dronefleet-agent`. Same `dronefleet-agent-cicd.yml` → GHCR → `values.yaml` → Argo CD flow as `dronefleet`, triggered by `dronefleet-agent`'s own `notify-cicd.yml` (which needs a `GITOPS_PAT` secret on that repo).
+- Two Deployments: the agent (`ghcr.io/spillala/dronefleet-agent`, tag CI-managed) and an Ollama server (`ollama/ollama:latest`, `Recreate` strategy — a rolling update would need two copies of the model in memory at once) with a PVC for pulled models and a pre-sync Job that pulls `agent.ollamaModel`.
+- Ollama resources are `requests: 200m / 1Gi`, `limits: 3 / 9Gi` on purpose: the agent sets `keep_alive: 30s` on every chat call, so the model unloads between reconcile passes and the request reflects the *idle* server. While loaded, `gemma4:e2b-it-q4_K_M` costs ~3GB anonymous RSS (the rest of the ~6.7GB Ollama reports is mmap'd, reclaimable page cache); the limit covers that burst. Before the keep_alive fix the model was resident permanently and helped push the 14GB dev host into swap far enough to time out MicroK8s's dqlite — see `dronefleet-agent`'s README, "Memory behaviour".
+- Needs its own `ghcr-pull-secret` in the `dronefleet-agent` namespace (see setup above) — secrets don't cross namespaces.
+- **GHCR write access is per package, not per repo.** `dronefleet-agent-cicd.yml` pushes with this repo's `GITHUB_TOKEN`. That only works if the `ghcr.io/spillala/dronefleet-agent` package is linked to `dockops-cicd`, which GHCR does automatically *only when a workflow creates the package*. If the package already exists from a manual `docker push` (it did), the push fails with `denied: permission_denied: read_package` / `write_package` until `dockops-cicd` is added with the **Write** role under the package's *Manage Actions access* settings (`github.com/users/spillala/packages/container/dronefleet-agent/settings`). There's no API for this; it's a one-time UI step per pre-existing package. `dronefleet` and `mavlink-bridge` never hit it because CI created their packages.
+- Argo CD's `selfHeal` reverts any manual `kubectl set image` within seconds. To test a local build on the cluster, go through the pipeline — or accept that the manual change won't stick.
 
 ## PX4 SITL + Gazebo simulator
 
@@ -151,16 +168,20 @@ scripts/
 - [`dronefleet`](../dronefleet) — the Go API this pipeline builds and deploys
 - [`dronefleet-mcp`](../dronefleet-mcp) — MCP server exposing the deployed `dronefleet` API as tools for AI agents
 - [`dronefleet-agent`](../dronefleet-agent) — autonomous fault-diagnosis agent (Ollama + Gemma), deployed via `helm/dronefleet-agent`
+- [`mavlink-bridge`](../mavlink-bridge) — reads the simulator's MAVLink stream and reports flight state + fault causes to `dronefleet`; deployed as a sidecar via `helm/px4-sitl-gazebo`
 
-## Status & next steps (2026-09-06)
+## Status & next steps (2026-09-14)
 
 **Done:**
-- `dronefleet`, `dronefleet-agent`, and `px4-sitl-gazebo` all `Synced`/`Healthy` in Argo CD
-- Real app-of-apps auto-discovery working (`bootstrap/root-app.yaml`) — new Applications in `argocd/` no longer need a manual `kubectl apply`
-- PX4 simulator running on a prebuilt image instead of the from-source build that previously hung the host
+- `dronefleet`, `dronefleet-agent`, and `px4-sitl-gazebo` all `Synced`/`Healthy` in Argo CD; app-of-apps auto-discovery working (`bootstrap/root-app.yaml`)
+- The simulator's MAVLink stream is consumed: `mavlink-bridge` runs as a sidecar in the `px4-sitl-gazebo` pod and writes flight state + `STATUSTEXT` fault events to `dronefleet` for `drone-004`. Agent 1's findings now name real causes instead of "status: fault".
+- `dronefleet-agent` has been through the real pipeline end to end for the first time (it had only ever run from a manually pushed `:latest` before). Three latent gaps fixed along the way: the repo wasn't on GitHub, its GHCR package needed *Manage Actions access* for this repo, and `ghcr-pull-secret` held an expired PAT in both namespaces — all documented above.
+- Host memory pressure from Ollama eased (`keep_alive`, right-sized requests) and measured over two reconcile cycles: ~5.7GB still free at peak, swap flat.
 
 **Open items:**
-- Nothing currently connects the running simulator to `dronefleet`/`dronefleet-agent` — MAVLink telemetry from `px4-sitl-gazebo-svc:14550` isn't consumed anywhere yet. Deciding how (a bridge service? extend `dronefleet-mcp`?) is the next real design question.
-- `px4-sitl-gazebo-svc` is `ClusterIP`; there's no way to point QGroundControl or a MAVSDK client at it from outside the cluster yet if that's wanted for manual testing.
-- Sustained ~1.8-core CPU on a single idle simulated vehicle leaves limited room to run a second one on this node without raising `resources.limits.cpu` or watching the AI-verify job's pass/fail more closely.
+- Phase B: nothing yet gates a deployment or heavy inference on flight state — the safety principle has no enforcement point. Next build per `DRONEFLEET_NEXT_PHASE_PLAN.md`.
+- A diagnose pass takes ~2m45s of CPU inference, so the model is still resident ~65% of each 5-minute cycle; the dev host is fine today but there's no big margin. Faster inference or a longer `agent.watchInterval` are the levers.
+- `metrics-server` is enabled but the Metrics API isn't up — `kubectl top` doesn't work on this cluster.
+- `px4-sitl-gazebo-svc` is `ClusterIP`; QGroundControl or a MAVSDK client outside the cluster can't reach it yet.
+- Sustained ~1.8-core CPU on a single idle simulated vehicle leaves limited room for a second one without raising `resources.limits.cpu`.
 - This section is a point-in-time snapshot, not a maintained changelog — update or delete it as the project moves past it rather than letting it drift.
