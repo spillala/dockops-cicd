@@ -33,7 +33,7 @@ mavlinkBridge:
     repository: ghcr.io/spillala/mavlink-bridge
     # !! THIS FIELD IS MANAGED BY CI !!
     # mavlink-bridge-cicd.yml updates this via yq on every successful build.
-    tag: "2aaa273"
+    tag: "e2c8887"
     pullPolicy: IfNotPresent
   # Which dronefleet drone this MAVLink system reports as. There's exactly
   # one simulated vehicle today; multi-vehicle mapping is a Phase E concern.
